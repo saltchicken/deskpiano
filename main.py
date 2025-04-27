@@ -1,6 +1,7 @@
 import mido
 import sounddevice as sd
 import numpy as np
+from collections import deque
 import threading
 import time
 
@@ -8,6 +9,12 @@ import time
 SAMPLE_RATE = 44100
 BLOCKSIZE = 64  # smaller = lower latency
 VOLUME = 0.2
+
+# Reverb parameters
+REVERB_DELAY = int(0.33 * SAMPLE_RATE)  # 30ms delay
+REVERB_DECAY = 0.5  # Decay factor
+NUM_REVERBS = 4  # Number of delay lines
+REVERB_BUFFER_SIZE = REVERB_DELAY * NUM_REVERBS
 
 FILTER_CUTOFF = 2000  # Cutoff frequency in Hz
 FILTER_ALPHA = np.exp(-2 * np.pi * FILTER_CUTOFF / SAMPLE_RATE)
@@ -59,6 +66,27 @@ last_output_high = 0.0  # For high-pass filter
 last_input_high = 0.0  # For high-pass filter
 lock = threading.Lock()
 
+reverb_buffers = [deque([0.0] * REVERB_DELAY, maxlen=REVERB_DELAY) for _ in range(NUM_REVERBS)]
+reverb_gains = [REVERB_DECAY ** (i + 1) for i in range(NUM_REVERBS)]
+
+
+def apply_reverb(dry_signal):
+    wet_signal = np.zeros_like(dry_signal)
+    
+    for i, sample in enumerate(dry_signal):
+        # Add the dry sample to each reverb buffer
+        for buf, gain in zip(reverb_buffers, reverb_gains):
+            # Get the delayed sample and add it to the output
+            delayed = buf[0]
+            wet_signal[i] += delayed * gain
+            
+            # Update the buffer with the new sample
+            buf.append(sample + delayed * 0.5)
+    
+    # Mix dry and wet signals
+    return dry_signal * 0.7 + wet_signal * 0.3
+
+
 # === Audio Setup ===
 def frequency_from_midi_note(note):
     return 440.0 * (2 ** ((note - 69) / 12))
@@ -106,7 +134,6 @@ def audio_callback(outdata, frames, time_info, status):
             wave = np.zeros_like(t)
             for amplitude, harmonic in HARMONICS:
                 phase = 2 * np.pi * (freq * harmonic) * t
-                # Add slight detuning only for harpsichord
                 if USE_HARPSICHORD and harmonic > 1:
                     phase += 0.0001 * harmonic
                 wave += amplitude * np.sin(phase)
@@ -133,10 +160,13 @@ def audio_callback(outdata, frames, time_info, status):
         
         filtered[i] = high_pass
 
-    # Apply distortion only for harpsichord
+    # Apply distortion for harpsichord
     if USE_HARPSICHORD:
         filtered = np.tanh(filtered * 1.1)
 
+    # Apply reverb
+    filtered = apply_reverb(filtered)
+    
     outdata[:] = filtered.reshape(-1, 1)
     audio_callback.frame += frames
 
