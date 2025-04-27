@@ -15,9 +15,9 @@ HIGH_PASS_CUTOFF = 20  # Cutoff frequency in Hz
 HIGH_PASS_ALPHA = np.exp(-2 * np.pi * HIGH_PASS_CUTOFF / SAMPLE_RATE)
 
 # === ADSR Envelope Parameters ===
-DECAY_TIME = 0.2  # in seconds
+DECAY_TIME = 0.1  # in seconds
 ATTACK_TIME = 0.1  # in seconds
-SUSTAIN_LEVEL = 0.3  # 0 to 1
+SUSTAIN_LEVEL = 0.8  # 0 to 1
 RELEASE_TIME = 0.2  # in seconds
 
 # === State ===
