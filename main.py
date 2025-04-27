@@ -5,9 +5,9 @@ import threading
 import time
 
 # === Constants ===
-SAMPLE_RATE = 48000
-BLOCKSIZE = 256  # smaller = lower latency
-VOLUME = 0.05
+SAMPLE_RATE = 44100
+BLOCKSIZE = 64  # smaller = lower latency
+VOLUME = 0.15
 
 FILTER_CUTOFF = 2000  # Cutoff frequency in Hz
 FILTER_ALPHA = np.exp(-2 * np.pi * FILTER_CUTOFF / SAMPLE_RATE)
@@ -15,10 +15,10 @@ HIGH_PASS_CUTOFF = 20  # Cutoff frequency in Hz
 HIGH_PASS_ALPHA = np.exp(-2 * np.pi * HIGH_PASS_CUTOFF / SAMPLE_RATE)
 
 # === ADSR Envelope Parameters ===
-ATTACK_TIME = 0.3  # in seconds
 DECAY_TIME = 0.2  # in seconds
-SUSTAIN_LEVEL = 0.4  # 0 to 1
-RELEASE_TIME = 0.4  # in seconds
+ATTACK_TIME = 0.1  # in seconds
+SUSTAIN_LEVEL = 0.3  # 0 to 1
+RELEASE_TIME = 0.2  # in seconds
 
 # === State ===
 active_notes = {}  # {midi_note: (start_time, velocity)}
@@ -41,7 +41,8 @@ def envelope(time, start_time, attack_time, decay_time, sustain_level, release_t
         release_elapsed = time - release_start
         if release_elapsed >= release_time:
             return 0
-        return sustain_level * (1 - (release_elapsed / release_time))
+        # Linear fade-out for release phase
+        return sustain_level * (1 - release_elapsed / release_time)
     
     # Attack phase
     if elapsed < attack_time:
@@ -61,20 +62,30 @@ def audio_callback(outdata, frames, time_info, status):
     
     with lock:
         notes_to_remove = []
+        max_amplitude = 0.0
+        
+        # First pass: calculate maximum amplitude
+        for note, (start_time, velocity, release_time) in active_notes.items():
+            env = envelope(current_time, start_time, ATTACK_TIME, DECAY_TIME, 
+                         SUSTAIN_LEVEL, RELEASE_TIME, release_time)
+            if env <= 0:
+                notes_to_remove.append(note)
+                continue
+            max_amplitude = max(max_amplitude, velocity * env)
+        
+        # Second pass: generate audio with normalized amplitudes
         for note, (start_time, velocity, release_time) in active_notes.items():
             freq = frequency_from_midi_note(note)
             phase = 2 * np.pi * freq * t
             
-            # Calculate envelope
             env = envelope(current_time, start_time, ATTACK_TIME, DECAY_TIME, 
                          SUSTAIN_LEVEL, RELEASE_TIME, release_time)
             
             if env <= 0:
-                notes_to_remove.append(note)
                 continue
                 
-            adjusted_velocity = velocity * env
-            wave = np.sin(phase) * adjusted_velocity
+            adjusted_velocity = (velocity * env) / max(max_amplitude, 1.0)
+            wave = np.sin(phase) * adjusted_velocity * VOLUME
             out += wave
             
         # Clean up finished notes
@@ -88,7 +99,6 @@ def audio_callback(outdata, frames, time_info, status):
         last_output_low = out[i] * (1 - FILTER_ALPHA) + last_output_low * FILTER_ALPHA
         
         # High-pass filter
-        # HPF = input - LPF of input
         high_pass = (last_output_high * HIGH_PASS_ALPHA + 
                     last_output_low - last_input_high)
         last_input_high = last_output_low
