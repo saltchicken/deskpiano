@@ -7,18 +7,26 @@ import time
 # === Constants ===
 SAMPLE_RATE = 48000
 BLOCKSIZE = 256  # smaller = lower latency
-VOLUME = 0.1
+VOLUME = 0.05
+
+FILTER_CUTOFF = 2000  # Cutoff frequency in Hz
+FILTER_ALPHA = np.exp(-2 * np.pi * FILTER_CUTOFF / SAMPLE_RATE)
+HIGH_PASS_CUTOFF = 20  # Cutoff frequency in Hz
+HIGH_PASS_ALPHA = np.exp(-2 * np.pi * HIGH_PASS_CUTOFF / SAMPLE_RATE)
 
 # === ADSR Envelope Parameters ===
 ATTACK_TIME = 0.3  # in seconds
 DECAY_TIME = 0.2  # in seconds
-SUSTAIN_LEVEL = 0.7  # 0 to 1
+SUSTAIN_LEVEL = 0.4  # 0 to 1
 RELEASE_TIME = 0.4  # in seconds
 
 # === State ===
 active_notes = {}  # {midi_note: (start_time, velocity)}
 note_timestamps = {}  # {midi_note: midi_receive_time}
 latency_measurements = []  # list of latencies (seconds)
+last_output_low = 0.0  # For low-pass filter
+last_output_high = 0.0  # For high-pass filter
+last_input_high = 0.0  # For high-pass filter
 lock = threading.Lock()
 
 # === Audio Setup ===
@@ -46,6 +54,7 @@ def envelope(time, start_time, attack_time, decay_time, sustain_level, release_t
         return sustain_level
 
 def audio_callback(outdata, frames, time_info, status):
+    global last_output_low, last_output_high, last_input_high
     t = (np.arange(frames) + audio_callback.frame) / SAMPLE_RATE
     out = np.zeros(frames, dtype=np.float32)
     current_time = time.time()
@@ -53,25 +62,18 @@ def audio_callback(outdata, frames, time_info, status):
     with lock:
         notes_to_remove = []
         for note, (start_time, velocity, release_time) in active_notes.items():
-            # Profiler: if note just started, record latency
-            if note in note_timestamps:
-                latency = current_time - note_timestamps[note]
-                latency_measurements.append(latency)
-                print(f"[Profiler] Note {note}: {latency * 1000:.2f} ms latency")
-                del note_timestamps[note]
-
-            # Apply envelope to the velocity (volume)
-            envelope_factor = envelope(current_time, start_time, ATTACK_TIME, DECAY_TIME, 
-                                    SUSTAIN_LEVEL, RELEASE_TIME, release_time)
+            freq = frequency_from_midi_note(note)
+            phase = 2 * np.pi * freq * t
             
-            # Remove note if envelope has reached zero
-            if envelope_factor == 0:
+            # Calculate envelope
+            env = envelope(current_time, start_time, ATTACK_TIME, DECAY_TIME, 
+                         SUSTAIN_LEVEL, RELEASE_TIME, release_time)
+            
+            if env <= 0:
                 notes_to_remove.append(note)
                 continue
                 
-            adjusted_velocity = velocity * envelope_factor
-            freq = frequency_from_midi_note(note)
-            phase = 2 * np.pi * freq * (t - start_time)
+            adjusted_velocity = velocity * env
             wave = np.sin(phase) * adjusted_velocity
             out += wave
             
@@ -79,9 +81,30 @@ def audio_callback(outdata, frames, time_info, status):
         for note in notes_to_remove:
             del active_notes[note]
 
-    out = np.clip(out, -1.0, 1.0)
+    # Apply filters in series (low-pass then high-pass)
+    filtered = np.zeros_like(out)
+    for i in range(len(out)):
+        # Low-pass filter
+        last_output_low = out[i] * (1 - FILTER_ALPHA) + last_output_low * FILTER_ALPHA
+        
+        # High-pass filter
+        # HPF = input - LPF of input
+        high_pass = (last_output_high * HIGH_PASS_ALPHA + 
+                    last_output_low - last_input_high)
+        last_input_high = last_output_low
+        last_output_high = high_pass
+        
+        filtered[i] = high_pass
+
+    out = np.clip(filtered, -1.0, 1.0)
     outdata[:] = out.reshape(-1, 1)
     audio_callback.frame += frames
+
+# Add this function to dynamically control both filters
+def set_filter_cutoffs(low_freq, high_freq):
+    global FILTER_ALPHA, HIGH_PASS_ALPHA
+    FILTER_ALPHA = np.exp(-2 * np.pi * low_freq / SAMPLE_RATE)
+    HIGH_PASS_ALPHA = np.exp(-2 * np.pi * high_freq / SAMPLE_RATE)
 
 def midi_thread():
     input_names = mido.get_input_names()
@@ -109,6 +132,8 @@ if __name__ == "__main__":
     audio_callback.frame = 0
     midi_thread_obj = threading.Thread(target=midi_thread, daemon=True)
     midi_thread_obj.start()
+
+    set_filter_cutoffs(2000, 20)
 
     try:
         with sd.OutputStream(
