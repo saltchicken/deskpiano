@@ -8,8 +8,8 @@ import time
 # === Constants ===
 SAMPLE_RATE = 44100
 BLOCKSIZE = 64  # smaller = lower latency
-VOLUME = 0.25
-OUTPUT_GAIN = 2.0
+VOLUME = 0.1
+OUTPUT_GAIN = 5.0
 
 # Reverb parameters
 REVERB_DELAY = int(0.33 * SAMPLE_RATE)  # 30ms delay
