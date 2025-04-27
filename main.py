@@ -7,7 +7,7 @@ import time
 # === Constants ===
 SAMPLE_RATE = 44100
 BLOCKSIZE = 64  # smaller = lower latency
-VOLUME = 0.15
+VOLUME = 0.2
 
 FILTER_CUTOFF = 2000  # Cutoff frequency in Hz
 FILTER_ALPHA = np.exp(-2 * np.pi * FILTER_CUTOFF / SAMPLE_RATE)
