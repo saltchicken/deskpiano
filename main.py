@@ -15,7 +15,7 @@ HIGH_PASS_CUTOFF = 20  # Cutoff frequency in Hz
 HIGH_PASS_ALPHA = np.exp(-2 * np.pi * HIGH_PASS_CUTOFF / SAMPLE_RATE)
 
 # === ADSR Envelope Parameters ===
-USE_HARPSICHORD = True  # Set to True for harpsichord, False for original piano
+USE_HARPSICHORD = False  # Set to True for harpsichord, False for original piano
 
 # === Instrument Configurations ===
 PIANO_CONFIG = {
@@ -54,7 +54,6 @@ HARMONICS = ACTIVE_CONFIG['harmonics']
 # === State ===
 active_notes = {}  # {midi_note: (start_time, velocity)}
 note_timestamps = {}  # {midi_note: midi_receive_time}
-latency_measurements = []  # list of latencies (seconds)
 last_output_low = 0.0  # For low-pass filter
 last_output_high = 0.0  # For high-pass filter
 last_input_high = 0.0  # For high-pass filter
@@ -161,7 +160,6 @@ def midi_thread():
                 with lock:
                     velocity = msg.velocity / 127.0 * VOLUME
                     active_notes[msg.note] = (now, velocity, None)  # None means note is not released
-                    note_timestamps[msg.note] = now
             elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
                 with lock:
                     if msg.note in active_notes:
@@ -190,14 +188,3 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
         print("\nExiting...")
-        if latency_measurements:
-            avg_latency = sum(latency_measurements) / len(latency_measurements)
-            min_latency = min(latency_measurements)
-            max_latency = max(latency_measurements)
-            print(f"\nLatency Results:")
-            print(f"- Average: {avg_latency * 1000:.2f} ms")
-            print(f"- Minimum: {min_latency * 1000:.2f} ms")
-            print(f"- Maximum: {max_latency * 1000:.2f} ms")
-        else:
-            print("No latency measurements recorded.")
-
