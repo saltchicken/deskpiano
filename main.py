@@ -15,20 +15,41 @@ HIGH_PASS_CUTOFF = 20  # Cutoff frequency in Hz
 HIGH_PASS_ALPHA = np.exp(-2 * np.pi * HIGH_PASS_CUTOFF / SAMPLE_RATE)
 
 # === ADSR Envelope Parameters ===
-ATTACK_TIME = 0.002  # Very fast attack
-DECAY_TIME = 0.1    # Quick decay
-SUSTAIN_LEVEL = 0.1 # Low sustain
-RELEASE_TIME = 0.05 # Quick release
+USE_HARPSICHORD = True  # Set to True for harpsichord, False for original piano
 
-# Harmonics for harpsichord tone
-HARMONICS = [
-    (1.0, 1.0),    # fundamental
-    (0.8, 2.0),    # octave
-    (0.5, 3.0),    # twelfth
-    (0.3, 4.0),    # double octave
-    (0.2, 5.0),    # major third + 2 octaves
-    (0.1, 6.0),    # fifth + 2 octaves
-]
+# === Instrument Configurations ===
+PIANO_CONFIG = {
+    'attack_time': 0.1,
+    'decay_time': 0.1,
+    'sustain_level': 0.7,
+    'release_time': 0.2,
+    'harmonics': [(1.0, 1.0)],  # Just fundamental frequency
+}
+
+HARPSICHORD_CONFIG = {
+    'attack_time': 0.002,
+    'decay_time': 0.1,
+    'sustain_level': 0.1,
+    'release_time': 0.05,
+    'harmonics': [
+        (1.0, 1.0),    # fundamental
+        (0.8, 2.0),    # octave
+        (0.5, 3.0),    # twelfth
+        (0.3, 4.0),    # double octave
+        (0.2, 5.0),    # major third + 2 octaves
+        (0.1, 6.0),    # fifth + 2 octaves
+    ],
+}
+
+# Set active configuration
+ACTIVE_CONFIG = HARPSICHORD_CONFIG if USE_HARPSICHORD else PIANO_CONFIG
+
+# Use these variables in place of the original constants
+ATTACK_TIME = ACTIVE_CONFIG['attack_time']
+DECAY_TIME = ACTIVE_CONFIG['decay_time']
+SUSTAIN_LEVEL = ACTIVE_CONFIG['sustain_level']
+RELEASE_TIME = ACTIVE_CONFIG['release_time']
+HARMONICS = ACTIVE_CONFIG['harmonics']
 
 # === State ===
 active_notes = {}  # {midi_note: (start_time, velocity)}
@@ -73,7 +94,6 @@ def audio_callback(outdata, frames, time_info, status):
     with lock:
         notes_to_remove = []
         
-        # Generate audio with harmonics
         for note, (start_time, velocity, release_time) in active_notes.items():
             freq = frequency_from_midi_note(note)
             env = envelope(current_time, start_time, ATTACK_TIME, DECAY_TIME, 
@@ -87,8 +107,8 @@ def audio_callback(outdata, frames, time_info, status):
             wave = np.zeros_like(t)
             for amplitude, harmonic in HARMONICS:
                 phase = 2 * np.pi * (freq * harmonic) * t
-                # Reduce detuning amount
-                if harmonic > 1:
+                # Add slight detuning only for harpsichord
+                if USE_HARPSICHORD and harmonic > 1:
                     phase += 0.0001 * harmonic
                 wave += amplitude * np.sin(phase)
             
@@ -98,19 +118,16 @@ def audio_callback(outdata, frames, time_info, status):
             wave = wave * env * velocity * scaling * VOLUME
             out += wave
             
-        # Clean up finished notes
         for note in notes_to_remove:
             del active_notes[note]
 
-    # Apply filters with protection against instability
+    # Apply filters
     filtered = np.zeros_like(out)
     for i in range(len(out)):
-        # Low-pass filter with stability check
         new_low = out[i] * (1 - FILTER_ALPHA) + last_output_low * FILTER_ALPHA
         if not np.isnan(new_low) and np.abs(new_low) < 100:
             last_output_low = new_low
         
-        # High-pass filter with stability check
         high_pass = (last_output_high * HIGH_PASS_ALPHA + 
                     last_output_low - last_input_high)
         if not np.isnan(high_pass) and np.abs(high_pass) < 100:
@@ -119,10 +136,10 @@ def audio_callback(outdata, frames, time_info, status):
         
         filtered[i] = high_pass
 
-    # Softer distortion
-    filtered = np.tanh(filtered * 1.1)
+    # Apply distortion only for harpsichord
+    if USE_HARPSICHORD:
+        filtered = np.tanh(filtered * 1.1)
 
-    # Final safety clipping
     out = np.clip(filtered, -1.0, 1.0)
     outdata[:] = out.reshape(-1, 1)
     audio_callback.frame += frames
