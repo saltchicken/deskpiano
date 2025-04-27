@@ -8,7 +8,8 @@ import time
 # === Constants ===
 SAMPLE_RATE = 44100
 BLOCKSIZE = 64  # smaller = lower latency
-VOLUME = 0.2
+VOLUME = 0.25
+OUTPUT_GAIN = 2.0
 
 # Reverb parameters
 REVERB_DELAY = int(0.33 * SAMPLE_RATE)  # 30ms delay
@@ -23,6 +24,7 @@ HIGH_PASS_ALPHA = np.exp(-2 * np.pi * HIGH_PASS_CUTOFF / SAMPLE_RATE)
 
 # === ADSR Envelope Parameters ===
 USE_HARPSICHORD = False  # Set to True for harpsichord, False for original piano
+USE_REVERB = True
 
 # === Instrument Configurations ===
 PIANO_CONFIG = {
@@ -165,7 +167,11 @@ def audio_callback(outdata, frames, time_info, status):
         filtered = np.tanh(filtered * 1.1)
 
     # Apply reverb
-    filtered = apply_reverb(filtered)
+    if USE_REVERB:
+        filtered = apply_reverb(filtered)
+
+    # Final output gain and clipping
+    filtered = np.clip(filtered * OUTPUT_GAIN, -1.0, 1.0)
     
     outdata[:] = filtered.reshape(-1, 1)
     audio_callback.frame += frames
