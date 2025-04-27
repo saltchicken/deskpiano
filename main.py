@@ -15,10 +15,20 @@ HIGH_PASS_CUTOFF = 20  # Cutoff frequency in Hz
 HIGH_PASS_ALPHA = np.exp(-2 * np.pi * HIGH_PASS_CUTOFF / SAMPLE_RATE)
 
 # === ADSR Envelope Parameters ===
-DECAY_TIME = 0.1  # in seconds
-ATTACK_TIME = 0.1  # in seconds
-SUSTAIN_LEVEL = 0.8  # 0 to 1
-RELEASE_TIME = 0.2  # in seconds
+ATTACK_TIME = 0.002  # Very fast attack
+DECAY_TIME = 0.1    # Quick decay
+SUSTAIN_LEVEL = 0.1 # Low sustain
+RELEASE_TIME = 0.05 # Quick release
+
+# Harmonics for harpsichord tone
+HARMONICS = [
+    (1.0, 1.0),    # fundamental
+    (0.8, 2.0),    # octave
+    (0.5, 3.0),    # twelfth
+    (0.3, 4.0),    # double octave
+    (0.2, 5.0),    # major third + 2 octaves
+    (0.1, 6.0),    # fifth + 2 octaves
+]
 
 # === State ===
 active_notes = {}  # {midi_note: (start_time, velocity)}
@@ -62,50 +72,57 @@ def audio_callback(outdata, frames, time_info, status):
     
     with lock:
         notes_to_remove = []
-        max_amplitude = 0.0
         
-        # First pass: calculate maximum amplitude
+        # Generate audio with harmonics
         for note, (start_time, velocity, release_time) in active_notes.items():
+            freq = frequency_from_midi_note(note)
             env = envelope(current_time, start_time, ATTACK_TIME, DECAY_TIME, 
                          SUSTAIN_LEVEL, RELEASE_TIME, release_time)
+            
             if env <= 0:
                 notes_to_remove.append(note)
                 continue
-            max_amplitude = max(max_amplitude, velocity * env)
-        
-        # Second pass: generate audio with normalized amplitudes
-        for note, (start_time, velocity, release_time) in active_notes.items():
-            freq = frequency_from_midi_note(note)
-            phase = 2 * np.pi * freq * t
             
-            env = envelope(current_time, start_time, ATTACK_TIME, DECAY_TIME, 
-                         SUSTAIN_LEVEL, RELEASE_TIME, release_time)
+            # Sum all harmonics for this note
+            wave = np.zeros_like(t)
+            for amplitude, harmonic in HARMONICS:
+                phase = 2 * np.pi * (freq * harmonic) * t
+                # Reduce detuning amount
+                if harmonic > 1:
+                    phase += 0.0001 * harmonic
+                wave += amplitude * np.sin(phase)
             
-            if env <= 0:
-                continue
-                
-            adjusted_velocity = (velocity * env) / max(max_amplitude, 1.0)
-            wave = np.sin(phase) * adjusted_velocity * VOLUME
+            # Scale the wave based on number of active notes
+            scaling = 1.0 / max(1.0, len(active_notes))
+            # Apply envelope, velocity, and scaling
+            wave = wave * env * velocity * scaling * VOLUME
             out += wave
             
         # Clean up finished notes
         for note in notes_to_remove:
             del active_notes[note]
 
-    # Apply filters in series (low-pass then high-pass)
+    # Apply filters with protection against instability
     filtered = np.zeros_like(out)
     for i in range(len(out)):
-        # Low-pass filter
-        last_output_low = out[i] * (1 - FILTER_ALPHA) + last_output_low * FILTER_ALPHA
+        # Low-pass filter with stability check
+        new_low = out[i] * (1 - FILTER_ALPHA) + last_output_low * FILTER_ALPHA
+        if not np.isnan(new_low) and np.abs(new_low) < 100:
+            last_output_low = new_low
         
-        # High-pass filter
+        # High-pass filter with stability check
         high_pass = (last_output_high * HIGH_PASS_ALPHA + 
                     last_output_low - last_input_high)
-        last_input_high = last_output_low
-        last_output_high = high_pass
+        if not np.isnan(high_pass) and np.abs(high_pass) < 100:
+            last_output_high = high_pass
+            last_input_high = last_output_low
         
         filtered[i] = high_pass
 
+    # Softer distortion
+    filtered = np.tanh(filtered * 1.1)
+
+    # Final safety clipping
     out = np.clip(filtered, -1.0, 1.0)
     outdata[:] = out.reshape(-1, 1)
     audio_callback.frame += frames
