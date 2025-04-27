@@ -9,6 +9,12 @@ SAMPLE_RATE = 48000
 BLOCKSIZE = 1024  # smaller = lower latency
 VOLUME = 0.01
 
+# === ADSR Envelope Parameters ===
+ATTACK_TIME = 0.1  # in seconds
+DECAY_TIME = 0.2  # in seconds
+SUSTAIN_LEVEL = 0.7  # 0 to 1
+RELEASE_TIME = 0.2  # in seconds
+
 # === State ===
 active_notes = {}  # {midi_note: (start_time, velocity)}
 note_timestamps = {}  # {midi_note: midi_receive_time}
@@ -18,6 +24,24 @@ lock = threading.Lock()
 # === Audio Setup ===
 def frequency_from_midi_note(note):
     return 440.0 * (2 ** ((note - 69) / 12))
+
+def envelope(time, start_time, attack_time, decay_time, sustain_level, release_time):
+    elapsed = time - start_time
+
+    # Attack phase
+    if elapsed < attack_time:
+        return elapsed / attack_time
+    # Decay phase
+    elif elapsed < attack_time + decay_time:
+        return 1 - (1 - sustain_level) * (elapsed - attack_time) / decay_time
+    # Sustain phase
+    elif elapsed < attack_time + decay_time + sustain_level:
+        return sustain_level
+    # Release phase
+    elif elapsed < attack_time + decay_time + sustain_level + release_time:
+        return sustain_level * (1 - (elapsed - attack_time - decay_time - sustain_level) / release_time)
+    else:
+        return 0  # After release, the note ends
 
 def audio_callback(outdata, frames, time_info, status):
     t = (np.arange(frames) + audio_callback.frame) / SAMPLE_RATE
@@ -34,9 +58,13 @@ def audio_callback(outdata, frames, time_info, status):
                 print(f"[Profiler] Note {note}: {latency * 1000:.2f} ms latency")
                 del note_timestamps[note]  # only once per note
 
+            # Apply envelope to the velocity (volume)
+            envelope_factor = envelope(current_time, start_time, ATTACK_TIME, DECAY_TIME, SUSTAIN_LEVEL, RELEASE_TIME)
+            adjusted_velocity = velocity * envelope_factor
+
             freq = frequency_from_midi_note(note)
             phase = 2 * np.pi * freq * (t - start_time)
-            wave = np.sin(phase) * velocity
+            wave = np.sin(phase) * adjusted_velocity
             out += wave
 
     out = np.clip(out, -1.0, 1.0)
