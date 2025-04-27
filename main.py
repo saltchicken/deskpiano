@@ -6,14 +6,14 @@ import time
 
 # === Constants ===
 SAMPLE_RATE = 48000
-BLOCKSIZE = 1024  # smaller = lower latency
-VOLUME = 0.01
+BLOCKSIZE = 256  # smaller = lower latency
+VOLUME = 0.1
 
 # === ADSR Envelope Parameters ===
-ATTACK_TIME = 0.1  # in seconds
+ATTACK_TIME = 0.3  # in seconds
 DECAY_TIME = 0.2  # in seconds
 SUSTAIN_LEVEL = 0.7  # 0 to 1
-RELEASE_TIME = 0.2  # in seconds
+RELEASE_TIME = 0.4  # in seconds
 
 # === State ===
 active_notes = {}  # {midi_note: (start_time, velocity)}
@@ -25,9 +25,16 @@ lock = threading.Lock()
 def frequency_from_midi_note(note):
     return 440.0 * (2 ** ((note - 69) / 12))
 
-def envelope(time, start_time, attack_time, decay_time, sustain_level, release_time):
+def envelope(time, start_time, attack_time, decay_time, sustain_level, release_time, release_start=None):
     elapsed = time - start_time
-
+    
+    # If note is released, calculate release envelope
+    if release_start is not None:
+        release_elapsed = time - release_start
+        if release_elapsed >= release_time:
+            return 0
+        return sustain_level * (1 - (release_elapsed / release_time))
+    
     # Attack phase
     if elapsed < attack_time:
         return elapsed / attack_time
@@ -35,45 +42,47 @@ def envelope(time, start_time, attack_time, decay_time, sustain_level, release_t
     elif elapsed < attack_time + decay_time:
         return 1 - (1 - sustain_level) * (elapsed - attack_time) / decay_time
     # Sustain phase
-    elif elapsed < attack_time + decay_time + sustain_level:
-        return sustain_level
-    # Release phase
-    elif elapsed < attack_time + decay_time + sustain_level + release_time:
-        return sustain_level * (1 - (elapsed - attack_time - decay_time - sustain_level) / release_time)
     else:
-        return 0  # After release, the note ends
+        return sustain_level
 
 def audio_callback(outdata, frames, time_info, status):
     t = (np.arange(frames) + audio_callback.frame) / SAMPLE_RATE
     out = np.zeros(frames, dtype=np.float32)
-
     current_time = time.time()
-
+    
     with lock:
-        for note, (start_time, velocity) in active_notes.items():
+        notes_to_remove = []
+        for note, (start_time, velocity, release_time) in active_notes.items():
             # Profiler: if note just started, record latency
             if note in note_timestamps:
                 latency = current_time - note_timestamps[note]
                 latency_measurements.append(latency)
                 print(f"[Profiler] Note {note}: {latency * 1000:.2f} ms latency")
-                del note_timestamps[note]  # only once per note
+                del note_timestamps[note]
 
             # Apply envelope to the velocity (volume)
-            envelope_factor = envelope(current_time, start_time, ATTACK_TIME, DECAY_TIME, SUSTAIN_LEVEL, RELEASE_TIME)
+            envelope_factor = envelope(current_time, start_time, ATTACK_TIME, DECAY_TIME, 
+                                    SUSTAIN_LEVEL, RELEASE_TIME, release_time)
+            
+            # Remove note if envelope has reached zero
+            if envelope_factor == 0:
+                notes_to_remove.append(note)
+                continue
+                
             adjusted_velocity = velocity * envelope_factor
-
             freq = frequency_from_midi_note(note)
             phase = 2 * np.pi * freq * (t - start_time)
             wave = np.sin(phase) * adjusted_velocity
             out += wave
+            
+        # Clean up finished notes
+        for note in notes_to_remove:
+            del active_notes[note]
 
     out = np.clip(out, -1.0, 1.0)
     outdata[:] = out.reshape(-1, 1)
     audio_callback.frame += frames
 
-audio_callback.frame = 0
-
-# === MIDI Input Thread ===
 def midi_thread():
     input_names = mido.get_input_names()
     if not input_names:
@@ -87,17 +96,17 @@ def midi_thread():
             if msg.type == 'note_on' and msg.velocity > 0:
                 with lock:
                     velocity = msg.velocity / 127.0 * VOLUME
-                    active_notes[msg.note] = (now, velocity)
+                    active_notes[msg.note] = (now, velocity, None)  # None means note is not released
                     note_timestamps[msg.note] = now
             elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
                 with lock:
                     if msg.note in active_notes:
-                        del active_notes[msg.note]
-                    if msg.note in note_timestamps:
-                        del note_timestamps[msg.note]
+                        start_time, velocity, _ = active_notes[msg.note]
+                        active_notes[msg.note] = (start_time, velocity, now)  # Store release time
 
 # === Main ===
 if __name__ == "__main__":
+    audio_callback.frame = 0
     midi_thread_obj = threading.Thread(target=midi_thread, daemon=True)
     midi_thread_obj.start()
 
