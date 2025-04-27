@@ -112,10 +112,8 @@ def audio_callback(outdata, frames, time_info, status):
                     phase += 0.0001 * harmonic
                 wave += amplitude * np.sin(phase)
             
-            # Scale the wave based on number of active notes
-            scaling = 1.0 / max(1.0, len(active_notes))
-            # Apply envelope, velocity, and scaling
-            wave = wave * env * velocity * scaling * VOLUME
+            # Apply envelope and velocity
+            wave = wave * env * velocity * VOLUME
             out += wave
             
         for note in notes_to_remove:
@@ -140,8 +138,7 @@ def audio_callback(outdata, frames, time_info, status):
     if USE_HARPSICHORD:
         filtered = np.tanh(filtered * 1.1)
 
-    out = np.clip(filtered, -1.0, 1.0)
-    outdata[:] = out.reshape(-1, 1)
+    outdata[:] = filtered.reshape(-1, 1)
     audio_callback.frame += frames
 
 # Add this function to dynamically control both filters
