@@ -6,6 +6,13 @@ import threading
 import time
 import asyncio
 import argparse
+import json
+from pathlib import Path
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # === Constants ===
 SAMPLE_RATE = 44100
@@ -16,52 +23,18 @@ REVERB_DELAY = int(0.13 * SAMPLE_RATE)  # 30ms delay
 NUM_REVERBS = 4  # Number of delay lines
 REVERB_BUFFER_SIZE = REVERB_DELAY * NUM_REVERBS
 
-# === Instrument Configurations ===
-PIANO_CONFIG = {
-    'attack_time': 0.1,
-    'decay_time': 0.1,
-    'sustain_level': 0.7,
-    'release_time': 0.2,
-    'harmonics': [(1.0, 1.0)],  # Just fundamental frequency
-}
-
-HARPSICHORD_CONFIG = {
-    'attack_time': 0.002,
-    'decay_time': 0.1,
-    'sustain_level': 0.1,
-    'release_time': 0.5,
-    'harmonics': [
-        (1.0, 1.0),    # fundamental
-        (0.8, 2.0),    # octave
-        (0.5, 3.0),    # twelfth
-        (0.3, 4.0),    # double octave
-        (0.2, 5.0),    # major third + 2 octaves
-        (0.1, 6.0),    # fifth + 2 octaves
-    ],
-}
-
 # Global parameters
 class SynthParams:
     def __init__(self):
-        self.use_harpsichord = False
         self.use_reverb = True
         self.volume = 0.1
         self.output_gain = 5.0
         self.reverb_decay = 0.5
         self.filter_cutoff = 2000
         self.high_pass_cutoff = 20
+        self.active_config = None
 
 params = SynthParams()
-
-# Set active configuration
-ACTIVE_CONFIG = HARPSICHORD_CONFIG if params.use_harpsichord else PIANO_CONFIG
-
-# Use these variables in place of the original constants
-ATTACK_TIME = ACTIVE_CONFIG['attack_time']
-DECAY_TIME = ACTIVE_CONFIG['decay_time']
-SUSTAIN_LEVEL = ACTIVE_CONFIG['sustain_level']
-RELEASE_TIME = ACTIVE_CONFIG['release_time']
-HARMONICS = ACTIVE_CONFIG['harmonics']
 
 # === State ===
 active_notes = {}  # {midi_note: (start_time, velocity)}
@@ -74,18 +47,22 @@ lock = threading.Lock()
 reverb_buffers = [deque([0.0] * REVERB_DELAY, maxlen=REVERB_DELAY) for _ in range(NUM_REVERBS)]
 reverb_gains = [params.reverb_decay ** (i + 1) for i in range(NUM_REVERBS)]
 
-def update_synth_config():
-    global ACTIVE_CONFIG, ATTACK_TIME, DECAY_TIME, SUSTAIN_LEVEL, RELEASE_TIME, HARMONICS, reverb_gains
-    
-    ACTIVE_CONFIG = HARPSICHORD_CONFIG if params.use_harpsichord else PIANO_CONFIG
-    ATTACK_TIME = ACTIVE_CONFIG['attack_time']
-    DECAY_TIME = ACTIVE_CONFIG['decay_time']
-    SUSTAIN_LEVEL = ACTIVE_CONFIG['sustain_level']
-    RELEASE_TIME = ACTIVE_CONFIG['release_time']
-    HARMONICS = ACTIVE_CONFIG['harmonics']
-    
-    reverb_gains = [params.reverb_decay ** (i + 1) for i in range(NUM_REVERBS)]
-    set_filter_cutoffs(params.filter_cutoff, params.high_pass_cutoff)
+def load_instrument_config(json_path):
+    logger.info(f"Loading instrument config from {json_path}")
+    with open(json_path, 'r') as f:
+        config = json.load(f)
+    return {
+        'attack_time': config['attack_time'],
+        'decay_time': config['decay_time'],
+        'sustain_level': config['sustain_level'],
+        'release_time': config['release_time'],
+        'harmonics': config['harmonics'],
+    }
+
+def set_filter_cutoffs(cutoff_low, cutoff_high):
+    global FILTER_ALPHA, HIGH_PASS_ALPHA
+    FILTER_ALPHA = np.exp(-2 * np.pi * cutoff_low / SAMPLE_RATE)
+    HIGH_PASS_ALPHA = np.exp(-2 * np.pi * cutoff_high / SAMPLE_RATE)
 
 def apply_reverb(dry_signal):
     wet_signal = np.zeros_like(dry_signal)
@@ -138,8 +115,12 @@ def audio_callback(outdata, frames, time_info, status):
         
         for note, (start_time, velocity, release_time) in active_notes.items():
             freq = frequency_from_midi_note(note)
-            env = envelope(current_time, start_time, ATTACK_TIME, DECAY_TIME, 
-                         SUSTAIN_LEVEL, RELEASE_TIME, release_time)
+            env = envelope(current_time, start_time, 
+                         params.active_config['attack_time'],
+                         params.active_config['decay_time'],
+                         params.active_config['sustain_level'],
+                         params.active_config['release_time'],
+                         release_time)
             
             if env <= 0:
                 notes_to_remove.append(note)
@@ -147,10 +128,8 @@ def audio_callback(outdata, frames, time_info, status):
             
             # Sum all harmonics for this note
             wave = np.zeros_like(t)
-            for amplitude, harmonic in HARMONICS:
+            for amplitude, harmonic in params.active_config['harmonics']:
                 phase = 2 * np.pi * (freq * harmonic) * t
-                if params.use_harpsichord and harmonic > 1:
-                    phase += 0.0001 * harmonic
                 wave += amplitude * np.sin(phase)
             
             # Apply envelope and velocity
@@ -175,32 +154,23 @@ def audio_callback(outdata, frames, time_info, status):
         
         filtered[i] = high_pass
 
-    # Apply distortion for harpsichord
-    if params.use_harpsichord:
-        filtered = np.tanh(filtered * 1.1)
-
-    # Apply reverb
+    # Apply reverb if enabled
     if params.use_reverb:
         filtered = apply_reverb(filtered)
 
     # Final output gain and clipping
-    filtered = np.clip(filtered * params.output_gain, -1.0, 1.0)
-    
-    outdata[:] = filtered.reshape(-1, 1)
+    outdata[:] = np.clip(filtered * params.output_gain, -1, 1).reshape(-1, 1)
     audio_callback.frame += frames
 
-def set_filter_cutoffs(low_freq, high_freq):
-    global FILTER_ALPHA, HIGH_PASS_ALPHA
-    FILTER_ALPHA = np.exp(-2 * np.pi * low_freq / SAMPLE_RATE)
-    HIGH_PASS_ALPHA = np.exp(-2 * np.pi * high_freq / SAMPLE_RATE)
+audio_callback.frame = 0
 
 async def midi_loop():
     input_names = mido.get_input_names()
     if not input_names:
-        print("No MIDI input devices found.")
+        logger.error("No MIDI input devices found.")
         return
 
-    print(f"Using MIDI input: {input_names[1]}")
+    logger.info(f"Using MIDI input: {input_names[1]}")
     with mido.open_input(input_names[1]) as port:
         while True:
             # Non-blocking check for MIDI messages
@@ -228,24 +198,40 @@ async def run_audio_stream():
     )
     
     with stream:
-        print("Audio stream started. Press Ctrl+C to quit.")
+        logger.info("Audio stream started. Press Ctrl+C to quit.")
         while True:
             await asyncio.sleep(1)
 
 async def main_loop():
     parser = argparse.ArgumentParser(description='DeskPiano - A software synthesizer')
-    parser.add_argument('--harpsichord', action='store_true', help='Use harpsichord sound')
+    parser.add_argument('--instrument', type=str, default='piano.json', help='JSON file containing instrument configuration')
     parser.add_argument('--no-reverb', action='store_false', dest='reverb', help='Disable reverb')
     parser.add_argument('--volume', type=float, default=0.1, help='Volume (0.0-1.0)')
     args = parser.parse_args()
 
-    # Apply command line arguments to params
-    params.use_harpsichord = args.harpsichord
     params.use_reverb = args.reverb
     params.volume = args.volume
-    update_synth_config()
 
-    audio_callback.frame = 0
+    logger.info(f"Loading instrument from: {args.instrument}")
+    # Load instrument configuration
+    instrument_path = Path(args.instrument)
+    if not instrument_path.is_absolute():
+        # Check in the default instruments directory
+        default_path = Path(__file__).parent.parent.parent / 'instruments' / args.instrument
+        if default_path.exists():
+            instrument_path = default_path
+            logger.info(f"Using instrument from default path: {default_path}")
+        elif not instrument_path.exists():
+            logger.error(f"Could not find instrument file: {args.instrument}")
+            return
+
+    try:
+        params.active_config = load_instrument_config(instrument_path)
+        logger.info("Successfully loaded instrument configuration")
+    except Exception as e:
+        logger.error(f"Error loading instrument configuration: {e}")
+        return
+
     set_filter_cutoffs(params.filter_cutoff, params.high_pass_cutoff)
 
     try:
@@ -256,13 +242,18 @@ async def main_loop():
         await asyncio.gather(*tasks)
 
     except KeyboardInterrupt:
-        print("\nExiting...")
+        logger.info("\nExiting...")
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
 def main():
-    asyncio.run(main_loop())
+    logger.info("Starting DeskPiano...")
+    try:
+        asyncio.run(main_loop())
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        raise
 
 if __name__ == "__main__":
     main()

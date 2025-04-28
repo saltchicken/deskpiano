@@ -1,0 +1,9 @@
+{
+    "name": "piano",
+    "attack_time": 0.1,
+    "decay_time": 0.1,
+    "sustain_level": 0.7,
+    "release_time": 0.2,
+    "harmonics": [[1.0, 1.0]]
+}
+

@@ -1,0 +1,16 @@
+{
+    "name": "harpsichord",
+    "attack_time": 0.002,
+    "decay_time": 0.1,
+    "sustain_level": 0.1,
+    "release_time": 0.5,
+    "harmonics": [
+        [1.0, 1.0],
+        [0.8, 2.0],
+        [0.5, 3.0],
+        [0.3, 4.0],
+        [0.2, 5.0],
+        [0.1, 6.0]
+    ]
+}
+
