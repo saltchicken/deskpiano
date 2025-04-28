@@ -5,13 +5,7 @@ from collections import deque
 import threading
 import time
 import asyncio
-from fastapi import FastAPI
-from pydantic import BaseModel
-import uvicorn
 import argparse
-
-# Add FastAPI app
-app = FastAPI()
 
 # === Constants ===
 SAMPLE_RATE = 44100
@@ -46,17 +40,17 @@ HARPSICHORD_CONFIG = {
     ],
 }
 
-# Define request/response models with Pydantic
-class SynthParams(BaseModel):
-    use_harpsichord: bool = False
-    use_reverb: bool = True
-    volume: float = 0.1
-    output_gain: float = 5.0
-    reverb_decay: float = 0.5
-    filter_cutoff: float = 2000
-    high_pass_cutoff: float = 20
+# Global parameters
+class SynthParams:
+    def __init__(self):
+        self.use_harpsichord = False
+        self.use_reverb = True
+        self.volume = 0.1
+        self.output_gain = 5.0
+        self.reverb_decay = 0.5
+        self.filter_cutoff = 2000
+        self.high_pass_cutoff = 20
 
-# Global parameters instance
 params = SynthParams()
 
 # Set active configuration
@@ -80,37 +74,18 @@ lock = threading.Lock()
 reverb_buffers = [deque([0.0] * REVERB_DELAY, maxlen=REVERB_DELAY) for _ in range(NUM_REVERBS)]
 reverb_gains = [params.reverb_decay ** (i + 1) for i in range(NUM_REVERBS)]
 
-# Add API endpoints
-@app.get("/params")
-def get_params():
-    return params
-
-@app.post("/params")
-def update_params(new_params: SynthParams):
-    global ACTIVE_CONFIG, ATTACK_TIME, DECAY_TIME, SUSTAIN_LEVEL, RELEASE_TIME, HARMONICS, params
+def update_synth_config():
+    global ACTIVE_CONFIG, ATTACK_TIME, DECAY_TIME, SUSTAIN_LEVEL, RELEASE_TIME, HARMONICS, reverb_gains
     
-    # Update only provided values
-    update_data = new_params.dict(exclude_unset=True)
-    current_data = params.dict()
-    updated_data = {**current_data, **update_data}
-    params = SynthParams(**updated_data)
+    ACTIVE_CONFIG = HARPSICHORD_CONFIG if params.use_harpsichord else PIANO_CONFIG
+    ATTACK_TIME = ACTIVE_CONFIG['attack_time']
+    DECAY_TIME = ACTIVE_CONFIG['decay_time']
+    SUSTAIN_LEVEL = ACTIVE_CONFIG['sustain_level']
+    RELEASE_TIME = ACTIVE_CONFIG['release_time']
+    HARMONICS = ACTIVE_CONFIG['harmonics']
     
-    if 'use_harpsichord' in update_data:
-        ACTIVE_CONFIG = HARPSICHORD_CONFIG if params.use_harpsichord else PIANO_CONFIG
-        ATTACK_TIME = ACTIVE_CONFIG['attack_time']
-        DECAY_TIME = ACTIVE_CONFIG['decay_time']
-        SUSTAIN_LEVEL = ACTIVE_CONFIG['sustain_level']
-        RELEASE_TIME = ACTIVE_CONFIG['release_time']
-        HARMONICS = ACTIVE_CONFIG['harmonics']
-    
-    if 'reverb_decay' in update_data:
-        global reverb_gains
-        reverb_gains = [params.reverb_decay ** (i + 1) for i in range(NUM_REVERBS)]
-    
-    if 'filter_cutoff' in update_data or 'high_pass_cutoff' in update_data:
-        set_filter_cutoffs(params.filter_cutoff, params.high_pass_cutoff)
-    
-    return {"status": "success"}
+    reverb_gains = [params.reverb_decay ** (i + 1) for i in range(NUM_REVERBS)]
+    set_filter_cutoffs(params.filter_cutoff, params.high_pass_cutoff)
 
 def apply_reverb(dry_signal):
     wet_signal = np.zeros_like(dry_signal)
@@ -243,19 +218,7 @@ async def midi_loop():
             
             await asyncio.sleep(0.001)  # Small sleep to prevent CPU hogging
 
-async def run_server():
-    config = uvicorn.Config(
-        app=app,
-        host="0.0.0.0",
-        port=5000,
-        log_level="info"
-    )
-    server = uvicorn.Server(config)
-    await server.serve()
-
 async def run_audio_stream():
-    # We still need to run the audio stream in a separate thread
-    # because sounddevice's callback needs to be real-time
     stream = sd.OutputStream(
         channels=1,
         callback=audio_callback,
@@ -271,35 +234,36 @@ async def run_audio_stream():
 
 async def main_loop():
     parser = argparse.ArgumentParser(description='DeskPiano - A software synthesizer')
-    parser.add_argument('--no-server', action='store_true', 
-                       help='Run without the FastAPI server')
+    parser.add_argument('--harpsichord', action='store_true', help='Use harpsichord sound')
+    parser.add_argument('--no-reverb', action='store_false', dest='reverb', help='Disable reverb')
+    parser.add_argument('--volume', type=float, default=0.1, help='Volume (0.0-1.0)')
     args = parser.parse_args()
 
+    # Apply command line arguments to params
+    params.use_harpsichord = args.harpsichord
+    params.use_reverb = args.reverb
+    params.volume = args.volume
+    update_synth_config()
+
     audio_callback.frame = 0
-    set_filter_cutoffs(2000, 20)
+    set_filter_cutoffs(params.filter_cutoff, params.high_pass_cutoff)
 
     try:
-        # Create tasks for MIDI handling and audio stream
         tasks = [
             asyncio.create_task(midi_loop()),
             asyncio.create_task(run_audio_stream())
         ]
-
-        # Add server task if --no-server is not specified
-        if not args.no_server:
-            tasks.append(asyncio.create_task(run_server()))
-            print("API server running on http://localhost:5000")
-
-        # Wait for all tasks to complete (or KeyboardInterrupt)
         await asyncio.gather(*tasks)
 
     except KeyboardInterrupt:
         print("\nExiting...")
-        # Cancel all running tasks
         for task in tasks:
             task.cancel()
-        # Wait for tasks to be cancelled
         await asyncio.gather(*tasks, return_exceptions=True)
 
 def main():
     asyncio.run(main_loop())
+
+if __name__ == "__main__":
+    main()
+
