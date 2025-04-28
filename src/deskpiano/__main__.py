@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
 from functools import partial
+import argparse
 
 # Add FastAPI app
 app = FastAPI()
@@ -239,6 +240,11 @@ def midi_thread():
                         active_notes[msg.note] = (start_time, velocity, now)  # Store release time
 
 def main():
+    parser = argparse.ArgumentParser(description='DeskPiano - A software synthesizer')
+    parser.add_argument('--no-server', action='store_true', 
+                       help='Run without the FastAPI server')
+    args = parser.parse_args()
+
     audio_callback.frame = 0
     midi_thread_obj = threading.Thread(target=midi_thread, daemon=True)
     midi_thread_obj.start()
@@ -246,18 +252,19 @@ def main():
     set_filter_cutoffs(2000, 20)
 
     # Run FastAPI in a separate thread
-    config = uvicorn.Config(
-        app=app,
-        host="0.0.0.0",
-        port=5000,
-        log_level="info"
-    )
-    server = uvicorn.Server(config)
-    api_thread = threading.Thread(
-        target=server.run,
-        daemon=True
-    )
-    api_thread.start()
+    if not args.no_server:
+        config = uvicorn.Config(
+            app=app,
+            host="0.0.0.0",
+            port=5000,
+            log_level="info"
+        )
+        server = uvicorn.Server(config)
+        api_thread = threading.Thread(
+            target=server.run,
+            daemon=True
+        )
+        api_thread.start()
 
     try:
         with sd.OutputStream(
