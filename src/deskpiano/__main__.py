@@ -4,27 +4,22 @@ import numpy as np
 from collections import deque
 import threading
 import time
+from fastapi import FastAPI
+from pydantic import BaseModel
+import uvicorn
+from functools import partial
+
+# Add FastAPI app
+app = FastAPI()
 
 # === Constants ===
 SAMPLE_RATE = 44100
 BLOCKSIZE = 64  # smaller = lower latency
-VOLUME = 0.1
-OUTPUT_GAIN = 5.0
 
 # Reverb parameters
-REVERB_DELAY = int(0.33 * SAMPLE_RATE)  # 30ms delay
-REVERB_DECAY = 0.5  # Decay factor
+REVERB_DELAY = int(0.13 * SAMPLE_RATE)  # 30ms delay
 NUM_REVERBS = 4  # Number of delay lines
 REVERB_BUFFER_SIZE = REVERB_DELAY * NUM_REVERBS
-
-FILTER_CUTOFF = 2000  # Cutoff frequency in Hz
-FILTER_ALPHA = np.exp(-2 * np.pi * FILTER_CUTOFF / SAMPLE_RATE)
-HIGH_PASS_CUTOFF = 20  # Cutoff frequency in Hz
-HIGH_PASS_ALPHA = np.exp(-2 * np.pi * HIGH_PASS_CUTOFF / SAMPLE_RATE)
-
-# === ADSR Envelope Parameters ===
-USE_HARPSICHORD = False  # Set to True for harpsichord, False for original piano
-USE_REVERB = True
 
 # === Instrument Configurations ===
 PIANO_CONFIG = {
@@ -39,7 +34,7 @@ HARPSICHORD_CONFIG = {
     'attack_time': 0.002,
     'decay_time': 0.1,
     'sustain_level': 0.1,
-    'release_time': 0.05,
+    'release_time': 0.5,
     'harmonics': [
         (1.0, 1.0),    # fundamental
         (0.8, 2.0),    # octave
@@ -50,8 +45,21 @@ HARPSICHORD_CONFIG = {
     ],
 }
 
+# Define request/response models with Pydantic
+class SynthParams(BaseModel):
+    use_harpsichord: bool = False
+    use_reverb: bool = True
+    volume: float = 0.1
+    output_gain: float = 5.0
+    reverb_decay: float = 0.5
+    filter_cutoff: float = 2000
+    high_pass_cutoff: float = 20
+
+# Global parameters instance
+params = SynthParams()
+
 # Set active configuration
-ACTIVE_CONFIG = HARPSICHORD_CONFIG if USE_HARPSICHORD else PIANO_CONFIG
+ACTIVE_CONFIG = HARPSICHORD_CONFIG if params.use_harpsichord else PIANO_CONFIG
 
 # Use these variables in place of the original constants
 ATTACK_TIME = ACTIVE_CONFIG['attack_time']
@@ -69,8 +77,39 @@ last_input_high = 0.0  # For high-pass filter
 lock = threading.Lock()
 
 reverb_buffers = [deque([0.0] * REVERB_DELAY, maxlen=REVERB_DELAY) for _ in range(NUM_REVERBS)]
-reverb_gains = [REVERB_DECAY ** (i + 1) for i in range(NUM_REVERBS)]
+reverb_gains = [params.reverb_decay ** (i + 1) for i in range(NUM_REVERBS)]
 
+# Add API endpoints
+@app.get("/params")
+def get_params():
+    return params
+
+@app.post("/params")
+def update_params(new_params: SynthParams):
+    global ACTIVE_CONFIG, ATTACK_TIME, DECAY_TIME, SUSTAIN_LEVEL, RELEASE_TIME, HARMONICS, params
+    
+    # Update only provided values
+    update_data = new_params.dict(exclude_unset=True)
+    current_data = params.dict()
+    updated_data = {**current_data, **update_data}
+    params = SynthParams(**updated_data)
+    
+    if 'use_harpsichord' in update_data:
+        ACTIVE_CONFIG = HARPSICHORD_CONFIG if params.use_harpsichord else PIANO_CONFIG
+        ATTACK_TIME = ACTIVE_CONFIG['attack_time']
+        DECAY_TIME = ACTIVE_CONFIG['decay_time']
+        SUSTAIN_LEVEL = ACTIVE_CONFIG['sustain_level']
+        RELEASE_TIME = ACTIVE_CONFIG['release_time']
+        HARMONICS = ACTIVE_CONFIG['harmonics']
+    
+    if 'reverb_decay' in update_data:
+        global reverb_gains
+        reverb_gains = [params.reverb_decay ** (i + 1) for i in range(NUM_REVERBS)]
+    
+    if 'filter_cutoff' in update_data or 'high_pass_cutoff' in update_data:
+        set_filter_cutoffs(params.filter_cutoff, params.high_pass_cutoff)
+    
+    return {"status": "success"}
 
 def apply_reverb(dry_signal):
     wet_signal = np.zeros_like(dry_signal)
@@ -88,8 +127,6 @@ def apply_reverb(dry_signal):
     # Mix dry and wet signals
     return dry_signal * 0.7 + wet_signal * 0.3
 
-
-# === Audio Setup ===
 def frequency_from_midi_note(note):
     return 440.0 * (2 ** ((note - 69) / 12))
 
@@ -136,12 +173,12 @@ def audio_callback(outdata, frames, time_info, status):
             wave = np.zeros_like(t)
             for amplitude, harmonic in HARMONICS:
                 phase = 2 * np.pi * (freq * harmonic) * t
-                if USE_HARPSICHORD and harmonic > 1:
+                if params.use_harpsichord and harmonic > 1:
                     phase += 0.0001 * harmonic
                 wave += amplitude * np.sin(phase)
             
             # Apply envelope and velocity
-            wave = wave * env * velocity * VOLUME
+            wave = wave * env * velocity * params.volume
             out += wave
             
         for note in notes_to_remove:
@@ -163,20 +200,19 @@ def audio_callback(outdata, frames, time_info, status):
         filtered[i] = high_pass
 
     # Apply distortion for harpsichord
-    if USE_HARPSICHORD:
+    if params.use_harpsichord:
         filtered = np.tanh(filtered * 1.1)
 
     # Apply reverb
-    if USE_REVERB:
+    if params.use_reverb:
         filtered = apply_reverb(filtered)
 
     # Final output gain and clipping
-    filtered = np.clip(filtered * OUTPUT_GAIN, -1.0, 1.0)
+    filtered = np.clip(filtered * params.output_gain, -1.0, 1.0)
     
     outdata[:] = filtered.reshape(-1, 1)
     audio_callback.frame += frames
 
-# Add this function to dynamically control both filters
 def set_filter_cutoffs(low_freq, high_freq):
     global FILTER_ALPHA, HIGH_PASS_ALPHA
     FILTER_ALPHA = np.exp(-2 * np.pi * low_freq / SAMPLE_RATE)
@@ -194,7 +230,7 @@ def midi_thread():
             now = time.time()
             if msg.type == 'note_on' and msg.velocity > 0:
                 with lock:
-                    velocity = msg.velocity / 127.0 * VOLUME
+                    velocity = msg.velocity / 127.0 * params.volume
                     active_notes[msg.note] = (now, velocity, None)  # None means note is not released
             elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
                 with lock:
@@ -202,13 +238,26 @@ def midi_thread():
                         start_time, velocity, _ = active_notes[msg.note]
                         active_notes[msg.note] = (start_time, velocity, now)  # Store release time
 
-# === Main ===
 if __name__ == "__main__":
     audio_callback.frame = 0
     midi_thread_obj = threading.Thread(target=midi_thread, daemon=True)
     midi_thread_obj.start()
 
     set_filter_cutoffs(2000, 20)
+
+    # Run FastAPI in a separate thread
+    config = uvicorn.Config(
+        app=app,
+        host="0.0.0.0",
+        port=5000,
+        log_level="info"
+    )
+    server = uvicorn.Server(config)
+    api_thread = threading.Thread(
+        target=server.run,
+        daemon=True
+    )
+    api_thread.start()
 
     try:
         with sd.OutputStream(
@@ -219,8 +268,10 @@ if __name__ == "__main__":
             dtype='float32'
         ):
             print("Audio stream started. Press Ctrl+C to quit.")
+            print("API server running on http://localhost:5000")
             while True:
                 time.sleep(1)
 
     except KeyboardInterrupt:
         print("\nExiting...")
+
