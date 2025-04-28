@@ -238,7 +238,7 @@ def midi_thread():
                         start_time, velocity, _ = active_notes[msg.note]
                         active_notes[msg.note] = (start_time, velocity, now)  # Store release time
 
-if __name__ == "__main__":
+def main():
     audio_callback.frame = 0
     midi_thread_obj = threading.Thread(target=midi_thread, daemon=True)
     midi_thread_obj.start()
