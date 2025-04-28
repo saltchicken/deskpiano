@@ -10,7 +10,8 @@ dependencies = [
     "sounddevice",
     "numpy",
     "fastapi",
-    "uvicorn"
+    "uvicorn",
+    "python-rtmidi"
 ]
 
 [project.scripts]
