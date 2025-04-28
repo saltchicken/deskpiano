@@ -216,23 +216,27 @@ async def main_loop():
     # Load instrument configuration
     instrument_path = Path(args.instrument)
     if not instrument_path.is_absolute():
-        # Check in the default instruments directory
-        default_path = Path(__file__).parent.parent.parent / 'instruments' / args.instrument
-        if default_path.exists():
-            instrument_path = default_path
-            logger.info(f"Using instrument from default path: {default_path}")
-        elif not instrument_path.exists():
-            logger.error(f"Could not find instrument file: {args.instrument}")
-            return
-
-    try:
-        params.active_config = load_instrument_config(instrument_path)
-        logger.info("Successfully loaded instrument configuration")
-    except Exception as e:
-        logger.error(f"Error loading instrument configuration: {e}")
-        return
+        # First check in the current directory
+        if instrument_path.exists():
+            pass
+        else:
+            # Then check in the package's instruments directory
+            package_dir = Path(__file__).parent
+            default_path = package_dir / 'instruments' / args.instrument
+            if default_path.exists():
+                instrument_path = default_path
+                logger.info(f"Using instrument from package path: {default_path}")
+            else:
+                logger.error(f"Could not find instrument file: {args.instrument}")
+                logger.error(f"Searched in:\n- {instrument_path}\n- {default_path}")
+                return
 
     set_filter_cutoffs(params.filter_cutoff, params.high_pass_cutoff)
+
+    params.active_config = load_instrument_config(instrument_path)
+    if params.active_config is None:
+        logger.error("Failed to load instrument configuration")
+        return
 
     try:
         tasks = [
