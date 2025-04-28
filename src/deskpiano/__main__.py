@@ -4,10 +4,10 @@ import numpy as np
 from collections import deque
 import threading
 import time
+import asyncio
 from fastapi import FastAPI
 from pydantic import BaseModel
 import uvicorn
-from functools import partial
 import argparse
 
 # Add FastAPI app
@@ -219,7 +219,7 @@ def set_filter_cutoffs(low_freq, high_freq):
     FILTER_ALPHA = np.exp(-2 * np.pi * low_freq / SAMPLE_RATE)
     HIGH_PASS_ALPHA = np.exp(-2 * np.pi * high_freq / SAMPLE_RATE)
 
-def midi_thread():
+async def midi_loop():
     input_names = mido.get_input_names()
     if not input_names:
         print("No MIDI input devices found.")
@@ -227,58 +227,79 @@ def midi_thread():
 
     print(f"Using MIDI input: {input_names[1]}")
     with mido.open_input(input_names[1]) as port:
-        for msg in port:
-            now = time.time()
-            if msg.type == 'note_on' and msg.velocity > 0:
-                with lock:
-                    velocity = msg.velocity / 127.0 * params.volume
-                    active_notes[msg.note] = (now, velocity, None)  # None means note is not released
-            elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
-                with lock:
-                    if msg.note in active_notes:
-                        start_time, velocity, _ = active_notes[msg.note]
-                        active_notes[msg.note] = (start_time, velocity, now)  # Store release time
+        while True:
+            # Non-blocking check for MIDI messages
+            for msg in port.iter_pending():
+                now = time.time()
+                if msg.type == 'note_on' and msg.velocity > 0:
+                    with lock:
+                        velocity = msg.velocity / 127.0 * params.volume
+                        active_notes[msg.note] = (now, velocity, None)
+                elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
+                    with lock:
+                        if msg.note in active_notes:
+                            start_time, velocity, _ = active_notes[msg.note]
+                            active_notes[msg.note] = (start_time, velocity, now)
+            
+            await asyncio.sleep(0.001)  # Small sleep to prevent CPU hogging
 
-def main():
+async def run_server():
+    config = uvicorn.Config(
+        app=app,
+        host="0.0.0.0",
+        port=5000,
+        log_level="info"
+    )
+    server = uvicorn.Server(config)
+    await server.serve()
+
+async def run_audio_stream():
+    # We still need to run the audio stream in a separate thread
+    # because sounddevice's callback needs to be real-time
+    stream = sd.OutputStream(
+        channels=1,
+        callback=audio_callback,
+        samplerate=SAMPLE_RATE,
+        blocksize=BLOCKSIZE,
+        dtype='float32'
+    )
+    
+    with stream:
+        print("Audio stream started. Press Ctrl+C to quit.")
+        while True:
+            await asyncio.sleep(1)
+
+async def main_loop():
     parser = argparse.ArgumentParser(description='DeskPiano - A software synthesizer')
     parser.add_argument('--no-server', action='store_true', 
                        help='Run without the FastAPI server')
     args = parser.parse_args()
 
     audio_callback.frame = 0
-    midi_thread_obj = threading.Thread(target=midi_thread, daemon=True)
-    midi_thread_obj.start()
-
     set_filter_cutoffs(2000, 20)
 
-    # Run FastAPI in a separate thread
-    if not args.no_server:
-        config = uvicorn.Config(
-            app=app,
-            host="0.0.0.0",
-            port=5000,
-            log_level="info"
-        )
-        server = uvicorn.Server(config)
-        api_thread = threading.Thread(
-            target=server.run,
-            daemon=True
-        )
-        api_thread.start()
-
     try:
-        with sd.OutputStream(
-            channels=1,
-            callback=audio_callback,
-            samplerate=SAMPLE_RATE,
-            blocksize=BLOCKSIZE,
-            dtype='float32'
-        ):
-            print("Audio stream started. Press Ctrl+C to quit.")
+        # Create tasks for MIDI handling and audio stream
+        tasks = [
+            asyncio.create_task(midi_loop()),
+            asyncio.create_task(run_audio_stream())
+        ]
+
+        # Add server task if --no-server is not specified
+        if not args.no_server:
+            tasks.append(asyncio.create_task(run_server()))
             print("API server running on http://localhost:5000")
-            while True:
-                time.sleep(1)
+
+        # Wait for all tasks to complete (or KeyboardInterrupt)
+        await asyncio.gather(*tasks)
 
     except KeyboardInterrupt:
         print("\nExiting...")
+        # Cancel all running tasks
+        for task in tasks:
+            task.cancel()
+        # Wait for tasks to be cancelled
+        await asyncio.gather(*tasks, return_exceptions=True)
 
+def main():
+    asyncio.run(main_loop())
